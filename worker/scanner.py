@@ -20,14 +20,14 @@ HL = "https://api.hyperliquid.xyz/info"
 T = 1024            # context bars
 H = 30              # horizon bars (flatten after 30)
 ATR_PERIOD = 21     # trainer label ATR period
-GATE = 0.5          # EV > 0.5 * risk
+MIN_EV_EQ_FRAC = 0.0005  # Sep 4: EV$ floor 0.05% of equity
 MIN_EV_USD = 50.0   # MSI $50 min EV gate
 MAX_RISK_USD = 1000.0
 RISK_PCT = 0.02     # cap 2% equity
 TAKER_FEE = 0.00045 # Hyperliquid taker fee per side (pessimistic)
 START_EQUITY = 10000.0
 MULTS = [1.0 + 0.5 * i for i in range(11)]   # combo k = 11*i+j: up=MULTS[i], down=MULTS[j]
-TFS = os.environ.get("EDDIE_TFS", "5m,15m,30m,1h,4h").split(",")
+TFS = os.environ.get("EDDIE_TFS", "5m,15m,30m,1h").split(",")  # Sep 4 MSI universe
 TF_MS = {"5m": 300000, "15m": 900000, "30m": 1800000, "1h": 3600000, "4h": 14400000}
 TOP_N = int(os.environ.get("EDDIE_TOP_N", "75"))  # universe: top perps by 24h volume
 MAX_POS = 8         # max concurrent paper positions
@@ -95,8 +95,8 @@ def best_signal(probs):
         u, d = MULTS[i], MULTS[j]
         p_up, p_dn, p_ne = probs[k][0], probs[k][1], probs[k][2]
         for direction, ev, risk in (("long", p_up*u - p_dn*d, d), ("short", p_dn*d - p_up*u, u)):
-            if ev > GATE * risk:
-                if best is None or ev > best["ev"]:
+            if ev > 0:  # Sep 4: min_ev = 0.0 (fractional, after costs)
+                if best is None or evr > best["evr"]:  # rank EV$ per $ risk
                     best = {"direction": direction, "u": u, "d": d, "ev": ev,
                             "evr": ev/risk, "p_up": p_up, "p_dn": p_dn, "p_ne": p_ne}
     return best
@@ -115,13 +115,15 @@ def main():
     uni = get_universe()
     now = int(time.time()*1000)
     # latest closed bar open-time per tf
-    closed_open = {tf: (now // TF_MS[tf]) * TF_MS[tf] - TF_MS[tf] for tf in TFS}
+    held_tfs = {p["tf"] for p in state["positions"]}
+    all_tfs = [t for t in TF_MS if t in (set(TFS) | held_tfs)]  # keep managing off-universe holds
+    closed_open = {tf: (now // TF_MS[tf]) * TF_MS[tf] - TF_MS[tf] for tf in all_tfs}
     n_scan = 0
     open_syms = {(p["symbol"], p["tf"]) for p in state["positions"]}
 
     for a in uni:
         sym = a["name"]
-        for tf in TFS:
+        for tf in all_tfs:
             key = f"{sym}:{tf}"
             last = state["last_scan_ts"].get(key, 0)
             sig_open = closed_open[tf]
@@ -175,7 +177,7 @@ def main():
                     break
 
             # --- scan for new signal ---
-            if due_scan and sym not in {p["symbol"] for p in state["positions"]}:  # one position per symbol (correlation guard)
+            if tf in TFS and due_scan and sym not in {p["symbol"] for p in state["positions"]}:  # one position per symbol (correlation guard)
                 n_scan += 1
                 win = [[o[k], h[k], l[k], c[k], v[k]] for k in range(len(rows))]
                 try:
@@ -193,10 +195,10 @@ def main():
                     notional = risk_usd / risk_frac if risk_frac > 0 else 0
                     lev_cap = min(a["maxLev"], 20)
                     notional = min(notional, state["equity"] * lev_cap)
-                    ev_usd = sig["ev"] * atr / entry * notional
+                    ev_usd = (sig["ev"] * atr / entry - 2 * TAKER_FEE) * notional  # fees both sides
                 fresh = ts[-1] == sig_open and (now - (sig_open + TF_MS[tf])) < TF_MS[tf]
                 took = False
-                if sig and ev_usd >= max(MIN_EV_USD, GATE * risk_usd) and fresh and \
+                if sig and ev_usd >= max(MIN_EV_USD, MIN_EV_EQ_FRAC * state["equity"]) and fresh and \
                    len(state["positions"]) < MAX_POS and notional > 0:
                     if sig["direction"] == "long":
                         tp, sl = entry + sig["u"]*atr, entry - sig["d"]*atr

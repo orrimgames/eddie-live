@@ -15,14 +15,21 @@
   try { cfgOverlay = JSON.parse(localStorage.getItem("eddie_cfg") || "{}"); } catch (e) {}
 
   var nativeFetch = window.fetch.bind(window);
-  function fetchState() {
-    return nativeFetch("./state/state.json?t=" + Date.now()).then(function (r) { return r.json(); })
-      .then(function (s) { state = s; }).catch(function () {});
+  var STATE_SOURCES = ["./state/state.json", "https://raw.githubusercontent.com/orrimgames/eddie-live/main/state/state.json"];
+  var TRADES_SOURCES = ["./state/trades.json", "https://raw.githubusercontent.com/orrimgames/eddie-live/main/state/trades.json"];
+  function fetchFirst(sources, ok) {
+    var i = 0;
+    function tryNext() {
+      if (i >= sources.length) return;
+      nativeFetch(sources[i] + "?t=" + Date.now()).then(function (r) {
+        if (!r.ok) throw new Error("http " + r.status);
+        return r.json();
+      }).then(ok).catch(function () { i++; tryNext(); });
+    }
+    tryNext();
   }
-  function fetchTrades() {
-    return nativeFetch("./state/trades.json?t=" + Date.now()).then(function (r) { return r.json(); })
-      .then(function (t) { trades = Array.isArray(t) ? t : []; }).catch(function () {});
-  }
+  function fetchState() { fetchFirst(STATE_SOURCES, function (s) { state = s; }); }
+  function fetchTrades() { fetchFirst(TRADES_SOURCES, function (t) { trades = Array.isArray(t) ? t : []; }); }
   fetchState(); fetchTrades();
   setInterval(fetchState, 20000); setInterval(fetchTrades, 60000);
 
