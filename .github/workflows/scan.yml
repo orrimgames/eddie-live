@@ -22,7 +22,7 @@ jobs:
           path: ~/.cache/pip
           key: pip-torch-cpu-v1
       - name: install torch (cpu)
-        run: pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
+        run: pip install --quiet numpy torch --index-url https://download.pytorch.org/whl/cpu
       - name: warm model cache
         uses: actions/cache@v4
         with:
