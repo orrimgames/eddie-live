@@ -96,9 +96,10 @@ def best_signal(probs):
         p_up, p_dn, p_ne = probs[k][0], probs[k][1], probs[k][2]
         for direction, ev, risk in (("long", p_up*u - p_dn*d, d), ("short", p_dn*d - p_up*u, u)):
             if ev > 0:  # Sep 4: min_ev = 0.0 (fractional, after costs)
-                if best is None or evr > best["evr"]:  # rank EV$ per $ risk
+                evr = ev/risk  # Sep 4 ranking: EV$ per $ risk
+                if best is None or evr > best["evr"]:
                     best = {"direction": direction, "u": u, "d": d, "ev": ev,
-                            "evr": ev/risk, "p_up": p_up, "p_dn": p_dn, "p_ne": p_ne}
+                            "evr": evr, "p_up": p_up, "p_dn": p_dn, "p_ne": p_ne}
     return best
 
 def main():
