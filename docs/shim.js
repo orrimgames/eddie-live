@@ -218,7 +218,7 @@
       var cur = state ? (state.equity_curve || []) : [];
       return Promise.resolve(jsonResp(cur.map(function (e) { return { ts: e.t / 1000, equity: e.eq }; })));
     }
-    if (path === "/api/config" && method === "GET") return Promise.resolve(jsonResp(Object.assign({}, CONFIG_BASE, cfgOverlay)));
+    if (path === "/api/config" && method === "GET") return Promise.resolve(jsonResp(Object.assign({}, CONFIG_BASE, cfgOverlay, { mode: "paper" })));  // web clone never leaves paper
     if (path === "/api/config" && method === "POST") {
       return new Response(init.body).text().then(function (b) {
         try { cfgOverlay = Object.assign(cfgOverlay, JSON.parse(b || "{}")); localStorage.setItem("eddie_cfg", JSON.stringify(cfgOverlay)); } catch (e) {}
