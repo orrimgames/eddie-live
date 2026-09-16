@@ -86,7 +86,7 @@
     var eq = cash + marginUsed + upnl;
     var last = state && state.last_run ? { combo: null, ts: state.last_run / 1000, opportunities: 0 } : { combo: null, ts: 0, opportunities: 0 };
     return {
-      trading_enabled: true, halted: false,
+      trading_enabled: true, halted: false, exchange_ready: true,
       equity: eq, margin_used: marginUsed,
       margin_available: Math.max(eq - marginUsed, 0), withdrawable: Math.max(cash, 0),
       avg_correlation: null, mode: "paper",
