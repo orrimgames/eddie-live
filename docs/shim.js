@@ -131,7 +131,7 @@
         detail: r.took ? "entry placed" : (r.reject || "blocked"),
         opportunities: r.signal ? 1 : 0, direction: r.signal || null, ev: r.ev_usd || null });
     });
-    return rows.slice(-80).reverse();
+    return rows.slice(-300).reverse();
   }
 
   function closedTrades() { return trades.filter(function (t) { return t.status === "closed" || t.exit_px != null || t.pnl != null; }); }
