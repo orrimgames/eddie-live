@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eddie - Live</title>
+<style>
+:root{--bg:#0b0e13;--card:#131822;--line:#1f2733;--txt:#e6ebf2;--dim:#8b98a9;--grn:#26a69a;--red:#ef5350;--org:#ff9800;--acc:#5b9dff}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--txt);font:14px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;padding:12px;max-width:1100px;margin:0 auto}
+h1{font-size:20px;font-weight:700;letter-spacing:.5px}
+.sub{color:var(--dim);font-size:12px}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;flex:1;min-width:140px}
+.card .k{color:var(--dim);font-size:11px;text-transform:uppercase;letter-spacing:.6px}
+.card .v{font-size:20px;font-weight:700;margin-top:2px}
+.up{color:var(--grn)}.dn{color:var(--red)}.org{color:var(--org)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{color:var(--dim);text-align:left;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px;padding:6px 8px;border-bottom:1px solid var(--line)}
+td{padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+.sec{margin-top:16px}
+.sec h2{font-size:13px;text-transform:uppercase;letter-spacing:.8px;color:var(--dim);margin-bottom:8px}
+.pill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:700}
+.pill.long{background:rgba(38,166,154,.15);color:var(--grn)}
+.pill.short{background:rgba(239,83,80,.15);color:var(--red)}
+.pill.took{background:rgba(91,157,255,.18);color:var(--acc)}
+.scroll{overflow-x:auto}
+canvas{width:100%;height:120px;display:block}
+#ticker{display:flex;gap:14px;overflow-x:auto;padding:8px 2px;color:var(--dim);font-size:12px}
+#ticker b{color:var(--txt)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--grn);margin-right:6px;animation:p 2s infinite}
+@keyframes p{50%{opacity:.3}}
+a{color:var(--acc)}
+</style>
+</head>
+<body>
+<h1><span class="dot"></span>EDDIE <span class="sub" id="mode">paper mode - Hyperliquid perps</span></h1>
+<div class="sub" id="status">connecting...</div>
+<div id="ticker"></div>
+<div class="row">
+  <div class="card"><div class="k">Equity (paper)</div><div class="v" id="eq">-</div></div>
+  <div class="card"><div class="k">Open positions</div><div class="v" id="npos">-</div></div>
+  <div class="card"><div class="k">Trades</div><div class="v" id="ntr">-</div></div>
+  <div class="card"><div class="k">Total PnL</div><div class="v" id="pnl">-</div></div>
+  <div class="card"><div class="k">Universe scanned</div><div class="v" id="uni">-</div></div>
+</div>
+<div class="sec card"><h2>Equity curve</h2><canvas id="curve"></canvas></div>
+<div class="sec card scroll"><h2>Open positions</h2><table id="pos"><thead><tr>
+<th>Symbol</th><th>TF</th><th>Dir</th><th>Entry</th><th>TP</th><th>SL</th><th>Bars</th><th>uPnL</th><th>p up/dn/neu</th>
+</tr></thead><tbody></tbody></table></div>
+<div class="sec card scroll"><h2>Scanner - live feed</h2><table id="scan"><thead><tr>
+<th>Time</th><th>Symbol</th><th>TF</th><th>Price</th><th>Signal</th><th>EV $</th><th></th>
+</tr></thead><tbody></tbody></table></div>
+<div class="sec card scroll"><h2>Closed trades</h2><table id="trades"><thead><tr>
+<th>Symbol</th><th>TF</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Reason</th><th>Bars</th><th>PnL</th><th>p up/dn/neu</th>
+</tr></thead><tbody></tbody></table></div>
+<div class="sec card scroll"><h2>Stats by timeframe</h2><table id="stats"><thead><tr>
+<th>TF</th><th>Trades</th><th>Win %</th><th>PnL</th><th>Profit factor</th>
+</tr></thead><tbody></tbody></table></div>
+<div class="sec sub" style="margin:16px 4px 30px">
+Model: Cortex (danielharkin21/Eddie-Cortex, TorchScript JIT, 2.9M params, 1024-bar context).
+Signals: 121 ATR barrier combos (1.0-6.0), EV gate &gt; 50% of risk, $50 min EV, risk = min($1k, 2% equity) per trade, 30-bar flatten, taker fees included.
+Neutral-outcome EV assumed 0 (quantile model not ported yet). Paper trading only - no real money, no keys.
+</div>
+<script>
+const RAW = "https://raw.githubusercontent.com/orrimgames/eddie-live/main/state";
+const $ = id => document.getElementById(id);
+const fmt$ = v => (v<0?"-$":"$") + Math.abs(v).toLocaleString(undefined,{maximumFractionDigits:0});
+const fmtP = v => v >= 1000 ? v.toLocaleString(undefined,{maximumFractionDigits:1}) : v.toLocaleString(undefined,{maximumFractionDigits:4});
+let mids = {};
+async function j(u){ const r = await fetch(u + "?t=" + Date.now()); if(!r.ok) throw 0; return r.json(); }
+async function refresh(){
+  try{
+    const [st, trades, scans] = await Promise.all([j(RAW+"/state.json"), j(RAW+"/trades.json"), j(RAW+"/scanlog.json")]);
+    const eq = st.equity_curve.length ? st.equity_curve[st.equity_curve.length-1].eq : st.equity;
+    const totPnl = trades.reduce((a,t)=>a+t.pnl,0);
+    $("eq").textContent = fmt$(eq); $("eq").className = "v " + (eq>=10000?"up":"dn");
+    $("npos").textContent = st.positions.length;
+    $("ntr").textContent = trades.length;
+    $("pnl").textContent = fmt$(totPnl); $("pnl").className = "v " + (totPnl>=0?"up":"dn");
+    $("uni").textContent = (st.universe_size||"-") + " perps x 5 tfs";
+    const ago = Math.max(0, Math.round((Date.now()-(st.last_run||0))/1000));
+    $("status").textContent = "scanner last ran " + (ago<90? ago+"s ago" : Math.round(ago/60)+"m ago") + " - dashboard auto-refreshes";
+    // positions
+    $("pos").querySelector("tbody").innerHTML = st.positions.map(p=>{
+      const mid = mids[p.symbol]; let up = "";
+      if(mid){ const r = p.direction=="long" ? (mid-p.entry)/p.entry : (p.entry-mid)/p.entry; const u = r*p.notional;
+        up = `<span class="${u>=0?"up":"dn"}">${fmt$(u)}</span>`; }
+      return `<tr><td><b>${p.symbol}</b></td><td>${p.tf}</td><td><span class="pill ${p.direction}">${p.direction.toUpperCase()}</span></td>
+      <td>${fmtP(p.entry)}</td><td class="up">${fmtP(p.tp)}</td><td class="dn">${fmtP(p.sl)}</td><td>${p.bars}/30</td><td>${up}</td>
+      <td class="sub">${p.p_up.toFixed(2)} / ${p.p_dn.toFixed(2)} / ${p.p_ne.toFixed(2)}</td></tr>`;}).join("") || `<tr><td colspan="9" class="sub">no open positions</td></tr>`;
+    // scan feed
+    $("scan").querySelector("tbody").innerHTML = scans.slice(-40).reverse().map(s=>{
+      const d = new Date(s.t); const tm = d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+      return `<tr><td class="sub">${tm}</td><td><b>${s.symbol}</b></td><td>${s.tf}</td><td>${fmtP(s.price)}</td>
+      <td>${s.signal?`<span class="pill ${s.signal}">${s.signal.toUpperCase()}</span>`:'<span class="sub">-</span>'}</td>
+      <td class="${s.ev_usd>0?"up":"sub"}">${s.ev_usd?fmt$(s.ev_usd):""}</td><td>${s.took?'<span class="pill took">ENTERED</span>':""}</td></tr>`;}).join("");
+    // trades
+    $("trades").querySelector("tbody").innerHTML = trades.slice(-30).reverse().map(t=>
+      `<tr><td><b>${t.symbol}</b></td><td>${t.tf}</td><td><span class="pill ${t.direction}">${t.direction[0].toUpperCase()}</span></td>
+      <td>${fmtP(t.entry)}</td><td>${fmtP(t.exit)}</td><td class="${t.reason=="TP"?"up":t.reason=="SL"?"dn":"org"}">${t.reason}</td><td>${t.bars}</td>
+      <td class="${t.pnl>=0?"up":"dn"}">${fmt$(t.pnl)}</td><td class="sub">${t.p_up.toFixed(2)} / ${t.p_dn.toFixed(2)} / ${t.p_ne.toFixed(2)}</td></tr>`).join("") || `<tr><td colspan="9" class="sub">no closed trades yet</td></tr>`;
+    // stats
+    $("stats").querySelector("tbody").innerHTML = Object.entries(st.stats||{}).map(([tf,s])=>
+      `<tr><td><b>${tf}</b></td><td>${s.n}</td><td>${Math.round(100*s.wins/s.n)}%</td>
+      <td class="${s.pnl>=0?"up":"dn"}">${fmt$(s.pnl)}</td><td>${s.pf??"-"}</td></tr>`).join("") || `<tr><td colspan="5" class="sub">no stats yet</td></tr>`;
+    drawCurve(st.equity_curve);
+  }catch(e){ $("status").textContent = "waiting for first scanner data..."; }
+}
+function drawCurve(pts){
+  const cv = $("curve"), ctx = cv.getContext("2d");
+  const w = cv.width = cv.clientWidth*2, h = cv.height = 240;
+  if(pts.length < 2){ ctx.fillStyle="#8b98a9"; ctx.font="20px sans-serif"; ctx.fillText("equity curve builds as the scanner runs", 20, 60); return; }
+  const vs = pts.map(p=>p.eq), mn = Math.min(...vs), mx = Math.max(...vs), rg = (mx-mn)||1;
+  ctx.strokeStyle = "#26a69a"; ctx.lineWidth = 3; ctx.beginPath();
+  vs.forEach((v,i)=>{ const x = i/(vs.length-1)*w, y = h-10-((v-mn)/rg)*(h-20); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
+  ctx.stroke();
+  ctx.strokeStyle = "#1f2733"; ctx.beginPath(); const y0 = h-10-((10000-mn)/rg)*(h-20);
+  if(y0>0&&y0<h){ctx.moveTo(0,y0);ctx.lineTo(w,y0);ctx.stroke();}
+}
+// live prices via Hyperliquid websocket (public, no key)
+function ws(){
+  const s = new WebSocket("wss://api.hyperliquid.xyz/ws");
+  s.onopen = () => s.send(JSON.stringify({method:"subscribe",subscription:{type:"allMids"}}));
+  s.onmessage = ev => { try{ const d = JSON.parse(ev.data);
+    if(d.channel==="allMids" && d.data && d.data.mids){ mids = d.data.mids;
+      $("ticker").innerHTML = ["BTC","ETH","SOL","HYPE","DOGE","XRP"].filter(k=>mids[k]).map(k=>`<span>${k} <b>${fmtP(parseFloat(mids[k]))}</b></span>`).join("");
+    } }catch(e){} };
+  s.onclose = () => setTimeout(ws, 3000);
+}
+ws(); refresh(); setInterval(refresh, 30000);
+</script>
+</body>
+</html>
