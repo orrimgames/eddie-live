@@ -114,7 +114,8 @@
 
   var CONFIG_BASE = {
     mode: "paper", kelly_threshold: 0.04, kelly_fraction: 0.25,
-    max_risk_per_trade: 0.02, paper_starting_balance: 10000, min_ev_usd: 50, min_ev_equity_frac: 0.0005, risk_per_trade_usd: 1000, max_open_positions: 12, taker_fee: TAKER,
+    max_risk_per_trade: 0.02, paper_starting_balance: 10000, min_ev_usd: 50, min_ev_equity_frac: 0.0005, risk_per_trade_usd: 1000,
+    slip_mult: 1.2, slip_ema_alpha: 0.05, slip_ref_notional: 5000, slip_percentile: 0.75, slip_window: 240, entry_book_depth_levels: 5, max_open_positions: 12, taker_fee: TAKER,
     entry_order_timeout_s: 5.0, max_position_bars: MAX_BARS,
     symbols: [], timeframes: TF_LIST, wallet_address: "",
     telegram_enabled: false, instance_id: "eddie-web", instance_priority: 1, peers: []
