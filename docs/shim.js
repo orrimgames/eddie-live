@@ -17,6 +17,7 @@
   var nativeFetch = window.fetch.bind(window);
   var STATE_SOURCES = ["./state/state.json", "https://raw.githubusercontent.com/orrimgames/eddie-live/main/state/state.json"];
   var TRADES_SOURCES = ["./state/trades.json", "https://raw.githubusercontent.com/orrimgames/eddie-live/main/state/trades.json"];
+  var SCANLOG_SOURCES = ["./state/scanlog.json", "https://raw.githubusercontent.com/orrimgames/eddie-live/main/state/scanlog.json"];
   function fetchFirst(sources, ok) {
     var i = 0;
     function tryNext() {
@@ -30,8 +31,9 @@
   }
   function fetchState() { fetchFirst(STATE_SOURCES, function (s) { state = s; }); }
   function fetchTrades() { fetchFirst(TRADES_SOURCES, function (t) { trades = Array.isArray(t) ? t : []; }); }
-  fetchState(); fetchTrades();
-  setInterval(fetchState, 20000); setInterval(fetchTrades, 60000);
+  function fetchScanlog() { fetchFirst(SCANLOG_SOURCES, function (l) { window.__scanlog = Array.isArray(l) ? l : []; }); }
+  fetchState(); fetchTrades(); fetchScanlog();
+  setInterval(fetchState, 20000); setInterval(fetchTrades, 60000); setInterval(fetchScanlog, 60000);
 
   // ---- live mids via Hyperliquid allMids WS ----
   (function midsLoop() {
@@ -92,7 +94,12 @@
       avg_correlation: null, mode: "paper",
       open_positions: pos.length, pending_entries: 0,
       models_ready: true, scan_count: state ? Object.keys(state.last_scan_ts || {}).length : 0,
-      last_scan: last
+      last_scan: last, entry_inflight: 0,
+      starting_balance: 10000,
+      realized_pnl: closedTrades().reduce(function (a, t) { return a + (t.pnl || 0); }, 0),
+      total_pnl: closedTrades().reduce(function (a, t) { return a + (t.pnl || 0); }, 0) + upnl,
+      unrealized_pnl: upnl, total_upnl: upnl, open_fees: 0,
+      scan_log: scanLogRows()
     };
   }
 
@@ -107,11 +114,24 @@
 
   var CONFIG_BASE = {
     mode: "paper", kelly_threshold: 0.04, kelly_fraction: 0.25,
-    max_risk_per_trade: 0.02, max_open_positions: 12, taker_fee: TAKER,
+    max_risk_per_trade: 0.02, paper_starting_balance: 10000, min_ev_usd: 50, min_ev_equity_frac: 0.0005, risk_per_trade_usd: 1000, max_open_positions: 12, taker_fee: TAKER,
     entry_order_timeout_s: 5.0, max_position_bars: MAX_BARS,
     symbols: [], timeframes: TF_LIST, wallet_address: "",
     telegram_enabled: false, instance_id: "eddie-web", instance_priority: 1, peers: []
   };
+
+  function scanLogRows() {
+    if (!state) return [];
+    var rows = [];
+    (state.scanlog || window.__scanlog || []).forEach(function (r) {
+      if (!r.signal) return;
+      rows.push({ ts: r.t / 1000, symbol: r.symbol, tf: r.tf,
+        outcome: r.took ? "accept" : "reject",
+        detail: r.took ? "entry placed" : "blocked",
+        opportunities: r.signal ? 1 : 0, direction: r.signal, ev: r.ev_usd || null });
+    });
+    return rows.slice(-80).reverse();
+  }
 
   function closedTrades() { return trades.filter(function (t) { return t.status === "closed" || t.exit_px != null || t.pnl != null; }); }
 
@@ -171,7 +191,26 @@
     if (path === "/api/positions") return Promise.resolve(jsonResp(positionsList()));
     if (path === "/api/trades") {
       return Promise.resolve(jsonResp(trades.slice(-500).reverse().map(function (t, i) {
-        return Object.assign({ id: i + 1, mode: "paper", status: "closed", fees: 0, bars_held: 0 }, t);
+        var dir = t.direction === "long" ? 1 : -1;
+        var row = {
+          id: i + 1, mode: "paper", status: "closed",
+          symbol: t.symbol, tf: t.tf, direction: t.direction,
+          entry_px: t.entry, exit_px: t.exit,
+          entry_time: t.entry_t / 1000, exit_time: t.exit_t / 1000,
+          exit_reason: ({ TP: "tp", SL: "sl", TIME: "max_bars" })[t.reason] || (t.reason || "").toLowerCase(),
+          tp_px: t.tp != null ? t.tp : null, sl_px: t.sl != null ? t.sl : null,
+          size: t.size != null ? t.size : null, notional: t.notional != null ? t.notional : null,
+          leverage: t.margin ? t.notional / t.margin : null, margin: t.margin != null ? t.margin : null,
+          pnl: t.pnl, fees: t.fees || 0, bars_held: t.bars || 0,
+          up_mult: t.u, down_mult: t.d,
+          p_win: dir === 1 ? t.p_up : t.p_dn, p_loss: dir === 1 ? t.p_dn : t.p_up, p_neutral: t.p_ne,
+          ev: t.ev != null ? t.ev : null
+        };
+        if (row.tp_px != null && row.size != null) {
+          row.target_usd = Math.abs(row.tp_px - row.entry_px) * row.size;
+          row.risk_usd = Math.abs(row.entry_px - row.sl_px) * row.size;
+        }
+        return row;
       })));
     }
     if (path === "/api/performance") return Promise.resolve(jsonResp(performanceObj()));

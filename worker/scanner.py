@@ -167,6 +167,8 @@ def main():
                             trades.append({"symbol": sym, "tf": tf, "direction": p["direction"],
                                 "entry": p["entry"], "exit": exit_px, "entry_t": p["entry_t"],
                                 "exit_t": rows[k]["t"], "reason": reason, "pnl": round(pnl, 2),
+                                "tp": p["tp"], "sl": p["sl"], "notional": p["notional"],
+                                "margin": p["margin"], "size": p["notional"] / p["entry"],
                                 "u": p["u"], "d": p["d"], "p_up": p["p_up"], "p_dn": p["p_dn"],
                                 "p_ne": p["p_ne"], "ev": p["ev"], "bars": p["bars"]})
                             state["positions"].remove(p)
