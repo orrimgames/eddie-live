@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Eddie - Live</title>
+<script src="https://unpkg.com/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 :root{--bg:#0b0e13;--card:#131822;--line:#1f2733;--txt:#e6ebf2;--dim:#8b98a9;--grn:#26a69a;--red:#ef5350;--org:#ff9800;--acc:#5b9dff}
 *{box-sizing:border-box;margin:0;padding:0}
@@ -31,6 +32,16 @@ canvas{width:100%;height:120px;display:block}
 .dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--grn);margin-right:6px;animation:p 2s infinite}
 @keyframes p{50%{opacity:.3}}
 a{color:var(--acc)}
+.controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+select,button.tf{background:#0e1420;color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:13px}
+button.tf{cursor:pointer;color:var(--dim)}
+button.tf.on{background:rgba(91,157,255,.18);color:var(--acc);border-color:var(--acc)}
+button.np{background:rgba(255,152,0,.12);color:var(--org);border:1px solid var(--org);border-radius:8px;padding:6px 10px;font-size:13px;cursor:pointer}
+#chartWrap{position:relative}
+#chart{width:100%;height:340px}
+#l2box{position:absolute;top:8px;right:60px;background:rgba(11,14,19,.85);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:11.5px;color:var(--dim);pointer-events:none;z-index:5}
+#l2box b{color:var(--txt)}
+#posinfo{position:absolute;top:8px;left:8px;background:rgba(11,14,19,.85);border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:11.5px;color:var(--dim);pointer-events:none;z-index:5}
 </style>
 </head>
 <body>
@@ -44,7 +55,17 @@ a{color:var(--acc)}
   <div class="card"><div class="k">Total PnL</div><div class="v" id="pnl">-</div></div>
   <div class="card"><div class="k">Universe scanned</div><div class="v" id="uni">-</div></div>
 </div>
-<div class="sec card"><h2>Equity curve</h2><canvas id="curve"></canvas></div>
+
+<div class="sec card"><h2>Chart</h2>
+  <div class="controls">
+    <select id="symSel"></select>
+    <span id="tfBtns"></span>
+    <button class="np" id="nextPos">Next position &#8594;</button>
+  </div>
+  <div id="chartWrap"><div id="chart"></div><div id="posinfo" style="display:none"></div><div id="l2box" style="display:none"></div></div>
+</div>
+
+<div class="sec card"><h2>Equity curve <span class="sub" style="text-transform:none">(live mark-to-market)</span></h2><canvas id="curve"></canvas></div>
 <div class="sec card scroll"><h2>Open positions</h2><table id="pos"><thead><tr>
 <th>Symbol</th><th>TF</th><th>Dir</th><th>Entry</th><th>TP</th><th>SL</th><th>Bars</th><th>uPnL</th><th>p up/dn/neu</th>
 </tr></thead><tbody></tbody></table></div>
@@ -64,71 +85,191 @@ Neutral-outcome EV assumed 0 (quantile model not ported yet). Paper trading only
 </div>
 <script>
 const RAW = "https://raw.githubusercontent.com/orrimgames/eddie-live/main/state";
+const HL = "https://api.hyperliquid.xyz/info";
 const $ = id => document.getElementById(id);
 const fmt$ = v => (v<0?"-$":"$") + Math.abs(v).toLocaleString(undefined,{maximumFractionDigits:0});
 const fmtP = v => v >= 1000 ? v.toLocaleString(undefined,{maximumFractionDigits:1}) : v.toLocaleString(undefined,{maximumFractionDigits:4});
-let mids = {};
+const TF_MS = {"1m":60000,"3m":180000,"5m":300000,"15m":900000,"30m":1800000,"1h":3600000,"4h":14400000};
+let mids = {}, ST = null, TRADES = [], SCANS = [];
+let curSym = "BTC", curTF = "4h", posCycle = -1;
+let chart, candleSeries, priceLines = [], curCandleSub = null, curL2Sub = null;
+
+async function hlPost(payload){ const r = await fetch(HL, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)}); return r.json(); }
 async function j(u){ const r = await fetch(u + "?t=" + Date.now()); if(!r.ok) throw 0; return r.json(); }
+
+// ---------- chart ----------
+function initChart(){
+  chart = LightweightCharts.createChart($("chart"), {
+    layout: {background: {color: "transparent"}, textColor: "#8b98a9", fontSize: 11},
+    grid: {vertLines: {color: "#161d29"}, horzLines: {color: "#161d29"}},
+    timeScale: {timeVisible: true, secondsVisible: false, borderColor: "#1f2733"},
+    rightPriceScale: {borderColor: "#1f2733"},
+    crosshair: {horzLine: {color: "#2a3547"}, vertLine: {color: "#2a3547"}},
+  });
+  candleSeries = chart.addCandlestickSeries({upColor: "#26a69a", downColor: "#ef5350", borderVisible: false, wickUpColor: "#26a69a", wickDownColor: "#ef5350"});
+  new ResizeObserver(() => chart.applyOptions({width: $("chart").clientWidth})).observe($("chart"));
+}
+async function loadChart(){
+  if(!chart) initChart();
+  priceLines.forEach(pl => { try{candleSeries.removePriceLine(pl);}catch(e){} }); priceLines = [];
+  candleSeries.setData([]); candleSeries.setMarkers([]);
+  $("posinfo").style.display = "none";
+  const now = Date.now(), n = 1050;
+  const rows = await hlPost({type:"candleSnapshot", req:{coin:curSym, interval:curTF, startTime: now - n*TF_MS[curTF], endTime: now}});
+  const data = rows.map(r => ({time: Math.floor(r.t/1000), open:+r.o, high:+r.h, low:+r.l, close:+r.c}));
+  candleSeries.setData(data);
+  chart.timeScale().setVisibleLogicalRange({from: data.length-120, to: data.length+5});
+  // position overlay for this symbol
+  const pos = (ST && ST.positions || []).find(p => p.symbol === curSym);
+  if(pos){
+    priceLines.push(candleSeries.createPriceLine({price: pos.entry, color: "#ff9800", lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, axisLabelVisible: true, title: "ENTRY"}));
+    priceLines.push(candleSeries.createPriceLine({price: pos.tp, color: "#26a69a", lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "TP"}));
+    priceLines.push(candleSeries.createPriceLine({price: pos.sl, color: "#ef5350", lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Dashed, axisLabelVisible: true, title: "SL"}));
+    const et = Math.floor(pos.entry_t/1000);
+    candleSeries.setMarkers([{time: et, position: pos.direction==="long"?"belowBar":"aboveBar", color:"#ff9800", shape: pos.direction==="long"?"arrowUp":"arrowDown", text: pos.direction.toUpperCase()}]);
+    $("posinfo").style.display = "block";
+    $("posinfo").innerHTML = `<b>${pos.symbol} ${pos.tf}</b> <span class="${pos.direction==="long"?"up":"dn"}">${pos.direction.toUpperCase()}</span> · ${pos.bars}/30 bars · entry ${fmtP(pos.entry)}`;
+  }
+  resub();
+}
+// ---------- websocket ----------
+let ws;
+function wsSend(o){ if(ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function resub(){
+  if(curCandleSub) wsSend({method:"unsubscribe", subscription: curCandleSub});
+  if(curL2Sub) wsSend({method:"unsubscribe", subscription: curL2Sub});
+  curCandleSub = {type:"candle", coin: curSym, interval: curTF};
+  curL2Sub = {type:"l2Book", coin: curSym};
+  wsSend({method:"subscribe", subscription: curCandleSub});
+  wsSend({method:"subscribe", subscription: curL2Sub});
+}
+function wsConnect(){
+  ws = new WebSocket("wss://api.hyperliquid.xyz/ws");
+  ws.onopen = () => {
+    wsSend({method:"subscribe", subscription:{type:"allMids"}});
+    curCandleSub = null; curL2Sub = null; resub();
+  };
+  ws.onmessage = ev => { try{ const d = JSON.parse(ev.data);
+    if(d.channel === "allMids" && d.data && d.data.mids){ mids = d.data.mids;
+      $("ticker").innerHTML = ["BTC","ETH","SOL","HYPE","DOGE","XRP"].filter(k=>mids[k]).map(k=>`<span>${k} <b>${fmtP(parseFloat(mids[k]))}</b></span>`).join("");
+      tickLive();
+    }
+    if(d.channel === "candle" && d.data && candleSeries){
+      const r = d.data;
+      if(r.s === curSym && r.i === curTF) candleSeries.update({time: Math.floor(r.t/1000), open:+r.o, high:+r.h, low:+r.l, close:+r.c});
+    }
+    if(d.channel === "l2Book" && d.data && d.data.coin === curSym){
+      const b = d.data.levels[0] && d.data.levels[0][0], a = d.data.levels[1] && d.data.levels[1][0];
+      if(b && a){ $("l2box").style.display = "block";
+        $("l2box").innerHTML = `L2 bid <b>${fmtP(parseFloat(b.px))}</b> · ask <b>${fmtP(parseFloat(a.px))}</b> · spread <b>${(parseFloat(a.px)-parseFloat(b.px)).toPrecision(2)}</b>`; }
+    }
+  }catch(e){} };
+  ws.onclose = () => setTimeout(wsConnect, 3000);
+}
+// ---------- live marks ----------
+function liveUPnL(p){ const mid = parseFloat(mids[p.symbol]); if(!mid) return null;
+  const r = p.direction==="long" ? (mid-p.entry)/p.entry : (p.entry-mid)/p.entry; return r*p.notional; }
+function liveEquity(){
+  if(!ST) return null;
+  let eq = ST.equity;
+  for(const p of ST.positions){ eq += p.margin; const u = liveUPnL(p); if(u !== null) eq += u; }
+  return eq;
+}
+function tickLive(){
+  // update uPnL cells + equity card + curve tail every tick batch
+  document.querySelectorAll("#pos tbody tr[data-sym]").forEach(tr => {
+    const p = (ST.positions||[]).find(x => x.symbol === tr.dataset.sym);
+    if(!p) return; const u = liveUPnL(p); const cell = tr.querySelector(".upnl");
+    if(u !== null && cell){ cell.innerHTML = `<span class="${u>=0?"up":"dn"}">${fmt$(u)}</span>`; }
+  });
+  const eq = liveEquity();
+  if(eq !== null){ $("eq").textContent = fmt$(eq); $("eq").className = "v " + (eq>=10000?"up":"dn"); drawCurve(ST.equity_curve, eq); }
+}
+// ---------- state refresh ----------
 async function refresh(){
   try{
     const [st, trades, scans] = await Promise.all([j(RAW+"/state.json"), j(RAW+"/trades.json"), j(RAW+"/scanlog.json")]);
-    const eq = st.equity_curve.length ? st.equity_curve[st.equity_curve.length-1].eq : st.equity;
+    ST = st; TRADES = trades; SCANS = scans;
     const totPnl = trades.reduce((a,t)=>a+t.pnl,0);
-    $("eq").textContent = fmt$(eq); $("eq").className = "v " + (eq>=10000?"up":"dn");
     $("npos").textContent = st.positions.length;
     $("ntr").textContent = trades.length;
     $("pnl").textContent = fmt$(totPnl); $("pnl").className = "v " + (totPnl>=0?"up":"dn");
     $("uni").textContent = (st.universe_size||"-") + " perps x 5 tfs";
     const ago = Math.max(0, Math.round((Date.now()-(st.last_run||0))/1000));
-    $("status").textContent = "scanner last ran " + (ago<90? ago+"s ago" : Math.round(ago/60)+"m ago") + " - dashboard auto-refreshes";
-    // positions
+    $("status").textContent = "scanner last ran " + (ago<90? ago+"s ago" : Math.round(ago/60)+"m ago") + " - runs every ~5 min, dashboard auto-refreshes";
     $("pos").querySelector("tbody").innerHTML = st.positions.map(p=>{
-      const mid = mids[p.symbol]; let up = "";
-      if(mid){ const r = p.direction=="long" ? (mid-p.entry)/p.entry : (p.entry-mid)/p.entry; const u = r*p.notional;
-        up = `<span class="${u>=0?"up":"dn"}">${fmt$(u)}</span>`; }
-      return `<tr><td><b>${p.symbol}</b></td><td>${p.tf}</td><td><span class="pill ${p.direction}">${p.direction.toUpperCase()}</span></td>
-      <td>${fmtP(p.entry)}</td><td class="up">${fmtP(p.tp)}</td><td class="dn">${fmtP(p.sl)}</td><td>${p.bars}/30</td><td>${up}</td>
+      const u = liveUPnL(p);
+      return `<tr data-sym="${p.symbol}"><td><b>${p.symbol}</b></td><td>${p.tf}</td><td><span class="pill ${p.direction}">${p.direction.toUpperCase()}</span></td>
+      <td>${fmtP(p.entry)}</td><td class="up">${fmtP(p.tp)}</td><td class="dn">${fmtP(p.sl)}</td><td>${p.bars}/30</td><td class="upnl">${u!==null?`<span class="${u>=0?"up":"dn"}">${fmt$(u)}</span>`:""}</td>
       <td class="sub">${p.p_up.toFixed(2)} / ${p.p_dn.toFixed(2)} / ${p.p_ne.toFixed(2)}</td></tr>`;}).join("") || `<tr><td colspan="9" class="sub">no open positions</td></tr>`;
-    // scan feed
     $("scan").querySelector("tbody").innerHTML = scans.slice(-40).reverse().map(s=>{
       const d = new Date(s.t); const tm = d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
       return `<tr><td class="sub">${tm}</td><td><b>${s.symbol}</b></td><td>${s.tf}</td><td>${fmtP(s.price)}</td>
       <td>${s.signal?`<span class="pill ${s.signal}">${s.signal.toUpperCase()}</span>`:'<span class="sub">-</span>'}</td>
       <td class="${s.ev_usd>0?"up":"sub"}">${s.ev_usd?fmt$(s.ev_usd):""}</td><td>${s.took?'<span class="pill took">ENTERED</span>':""}</td></tr>`;}).join("");
-    // trades
     $("trades").querySelector("tbody").innerHTML = trades.slice(-30).reverse().map(t=>
       `<tr><td><b>${t.symbol}</b></td><td>${t.tf}</td><td><span class="pill ${t.direction}">${t.direction[0].toUpperCase()}</span></td>
       <td>${fmtP(t.entry)}</td><td>${fmtP(t.exit)}</td><td class="${t.reason=="TP"?"up":t.reason=="SL"?"dn":"org"}">${t.reason}</td><td>${t.bars}</td>
       <td class="${t.pnl>=0?"up":"dn"}">${fmt$(t.pnl)}</td><td class="sub">${t.p_up.toFixed(2)} / ${t.p_dn.toFixed(2)} / ${t.p_ne.toFixed(2)}</td></tr>`).join("") || `<tr><td colspan="9" class="sub">no closed trades yet</td></tr>`;
-    // stats
     $("stats").querySelector("tbody").innerHTML = Object.entries(st.stats||{}).map(([tf,s])=>
       `<tr><td><b>${tf}</b></td><td>${s.n}</td><td>${Math.round(100*s.wins/s.n)}%</td>
       <td class="${s.pnl>=0?"up":"dn"}">${fmt$(s.pnl)}</td><td>${s.pf??"-"}</td></tr>`).join("") || `<tr><td colspan="5" class="sub">no stats yet</td></tr>`;
-    drawCurve(st.equity_curve);
+    drawCurve(st.equity_curve, liveEquity());
+    buildSymSel();
+    // refresh position overlay if current symbol has position changes
+    const pos = (st.positions||[]).find(p => p.symbol === curSym);
+    if(chart && (pos || $("posinfo").style.display === "block")) loadChart();
   }catch(e){ $("status").textContent = "waiting for first scanner data..."; }
 }
-function drawCurve(pts){
+function drawCurve(pts, liveEq){
   const cv = $("curve"), ctx = cv.getContext("2d");
   const w = cv.width = cv.clientWidth*2, h = cv.height = 240;
-  if(pts.length < 2){ ctx.fillStyle="#8b98a9"; ctx.font="20px sans-serif"; ctx.fillText("equity curve builds as the scanner runs", 20, 60); return; }
-  const vs = pts.map(p=>p.eq), mn = Math.min(...vs), mx = Math.max(...vs), rg = (mx-mn)||1;
-  ctx.strokeStyle = "#26a69a"; ctx.lineWidth = 3; ctx.beginPath();
+  let vs = pts.map(p=>p.eq);
+  if(liveEq !== null && liveEq !== undefined) vs = vs.concat([liveEq]);
+  if(vs.length < 2){ ctx.fillStyle="#8b98a9"; ctx.font="20px sans-serif"; ctx.fillText("equity curve starts on the scanner's first run", 20, 60); return; }
+  const mn = Math.min(...vs, 10000), mx = Math.max(...vs, 10000), rg = (mx-mn)||1;
+  // area fill
+  const grad = ctx.createLinearGradient(0,0,0,h); grad.addColorStop(0,"rgba(38,166,154,.25)"); grad.addColorStop(1,"rgba(38,166,154,0)");
+  ctx.beginPath();
   vs.forEach((v,i)=>{ const x = i/(vs.length-1)*w, y = h-10-((v-mn)/rg)*(h-20); i?ctx.lineTo(x,y):ctx.moveTo(x,y); });
-  ctx.stroke();
-  ctx.strokeStyle = "#1f2733"; ctx.beginPath(); const y0 = h-10-((10000-mn)/rg)*(h-20);
-  if(y0>0&&y0<h){ctx.moveTo(0,y0);ctx.lineTo(w,y0);ctx.stroke();}
+  ctx.strokeStyle = "#26a69a"; ctx.lineWidth = 3; ctx.stroke();
+  ctx.lineTo(w,h); ctx.lineTo(0,h); ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+  // $10k baseline
+  const y0 = h-10-((10000-mn)/rg)*(h-20);
+  if(y0>0&&y0<h){ ctx.strokeStyle = "#2a3547"; ctx.setLineDash([6,6]); ctx.beginPath(); ctx.moveTo(0,y0); ctx.lineTo(w,y0); ctx.stroke(); ctx.setLineDash([]);
+    ctx.fillStyle="#8b98a9"; ctx.font="18px sans-serif"; ctx.fillText("$10k start", 8, y0-6); }
 }
-// live prices via Hyperliquid websocket (public, no key)
-function ws(){
-  const s = new WebSocket("wss://api.hyperliquid.xyz/ws");
-  s.onopen = () => s.send(JSON.stringify({method:"subscribe",subscription:{type:"allMids"}}));
-  s.onmessage = ev => { try{ const d = JSON.parse(ev.data);
-    if(d.channel==="allMids" && d.data && d.data.mids){ mids = d.data.mids;
-      $("ticker").innerHTML = ["BTC","ETH","SOL","HYPE","DOGE","XRP"].filter(k=>mids[k]).map(k=>`<span>${k} <b>${fmtP(parseFloat(mids[k]))}</b></span>`).join("");
-    } }catch(e){} };
-  s.onclose = () => setTimeout(ws, 3000);
+// ---------- controls ----------
+let symList = [];
+async function loadUniverse(){
+  try{
+    const ctxs = await hlPost({type:"metaAndAssetCtxs"});
+    const vol = {}; ctxs[1].forEach(c => vol[c.coin] = parseFloat(c.dayNtlVlm||0));
+    symList = ctxs[0].universe.filter(u=>!u.isDelisted).map(u=>u.name).sort((a,b)=>(vol[b]||0)-(vol[a]||0));
+    buildSymSel();
+  }catch(e){ symList = ["BTC","ETH","SOL","HYPE","DOGE","XRP","ARB","ATOM","DYDX","AVAX"]; buildSymSel(); }
 }
-ws(); refresh(); setInterval(refresh, 30000);
+function buildSymSel(){
+  const sel = $("symSel"); if(!sel) return;
+  const posSyms = (ST ? ST.positions.map(p=>p.symbol) : []);
+  const opts = [...new Set([...posSyms, ...symList])];
+  if(sel.options.length !== opts.length){
+    sel.innerHTML = opts.map(s=>`<option value="${s}" ${s===curSym?"selected":""}>${posSyms.includes(s)?"● ":""}${s}</option>`).join("");
+  }
+  sel.value = curSym;
+}
+function tfButtons(){
+  $("tfBtns").innerHTML = Object.keys(TF_MS).map(tf=>`<button class="tf ${tf===curTF?"on":""}" data-tf="${tf}">${tf}</button>`).join("");
+  document.querySelectorAll("button.tf").forEach(b => b.onclick = () => { curTF = b.dataset.tf; tfButtons(); loadChart(); });
+}
+$("symSel").addEventListener("change", e => { curSym = e.target.value; loadChart(); });
+$("nextPos").onclick = () => {
+  const P = ST ? ST.positions : []; if(!P.length) return;
+  posCycle = (posCycle+1) % P.length;
+  curSym = P[posCycle].symbol; curTF = P[posCycle].tf;
+  buildSymSel(); tfButtons(); loadChart();
+};
+tfButtons(); loadUniverse(); wsConnect(); loadChart(); refresh(); setInterval(refresh, 30000);
 </script>
 </body>
 </html>
