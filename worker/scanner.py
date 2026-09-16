@@ -180,7 +180,13 @@ def main():
                     break
 
             # --- scan for new signal ---
-            if tf in TFS and due_scan and sym not in {p["symbol"] for p in state["positions"]}:  # one position per symbol (correlation guard)
+            if tf in TFS and due_scan and sym in {p["symbol"] for p in state["positions"]}:
+                # Sep 4: one position per instrument (HL nets per coin) - log the reject like the MSI does
+                scanlog.append({"t": now, "symbol": sym, "tf": tf, "price": c[-1],
+                    "signal": None, "ev_usd": 0, "took": False, "p_up": 0, "p_dn": 0,
+                    "reject": "symbol already open"})
+                state["last_scan_ts"][key] = sig_open
+            elif tf in TFS and due_scan:
                 n_scan += 1
                 win = [[o[k], h[k], l[k], c[k], v[k]] for k in range(len(rows))]
                 try:
@@ -218,11 +224,18 @@ def main():
                         "margin_locked_extra": 0, "atr": atr})
                     took = True
                     print(f"OPEN {sym} {tf} {sig['direction']} ev={ev_usd:.0f} p_up={sig['p_up']:.2f}", flush=True)
+                reason = None
+                if sig and not took:
+                    if not fresh: reason = "stale signal bar"
+                    elif len(state["positions"]) >= MAX_POS: reason = "max positions"
+                    elif notional <= 0: reason = "zero notional"
+                    else: reason = "ev_usd %.0f below gate %.0f" % (ev_usd, max(MIN_EV_USD, MIN_EV_EQ_FRAC * state["equity"]))
                 scanlog.append({"t": now, "symbol": sym, "tf": tf, "price": entry,
                     "signal": sig["direction"] if sig else None,
                     "ev_usd": round(ev_usd, 1) if sig else 0, "took": took,
                     "p_up": round(sig["p_up"], 3) if sig else 0,
-                    "p_dn": round(sig["p_dn"], 3) if sig else 0})
+                    "p_dn": round(sig["p_dn"], 3) if sig else 0,
+                    "reject": reason})
                 state["last_scan_ts"][key] = sig_open
 
     # equity curve point (mark-to-market approx on close prices of positions' entry bars skipped; use cash+margin)

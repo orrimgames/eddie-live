@@ -125,11 +125,11 @@
     if (!state) return [];
     var rows = [];
     (state.scanlog || window.__scanlog || []).forEach(function (r) {
-      if (!r.signal) return;
+      if (!r.signal && !r.reject) return;
       rows.push({ ts: r.t / 1000, symbol: r.symbol, tf: r.tf,
         outcome: r.took ? "accept" : "reject",
-        detail: r.took ? "entry placed" : "blocked",
-        opportunities: r.signal ? 1 : 0, direction: r.signal, ev: r.ev_usd || null });
+        detail: r.took ? "entry placed" : (r.reject || "blocked"),
+        opportunities: r.signal ? 1 : 0, direction: r.signal || null, ev: r.ev_usd || null });
     });
     return rows.slice(-80).reverse();
   }
